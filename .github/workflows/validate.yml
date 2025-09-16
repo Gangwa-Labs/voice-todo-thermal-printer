@@ -1,0 +1,86 @@
+name: Project Validation
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-python:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r audio_server/requirements.txt
+
+    - name: Validate Python syntax
+      run: |
+        python -m py_compile audio_server/whisper_server.py
+        python -m py_compile examples/test_audio.py
+
+    - name: Check for security issues
+      run: |
+        # Ensure no credentials are committed
+        if grep -r "password.*=" . --exclude-dir=.git --exclude="*.example" --exclude="*.md"; then
+          echo "ERROR: Found potential credentials in code!"
+          exit 1
+        fi
+        echo "✓ No credentials found in committed code"
+
+  validate-arduino:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Validate Arduino sketch structure
+      run: |
+        # Check that main .ino file exists
+        if [ ! -f "todo_habit_printer.ino" ]; then
+          echo "ERROR: Main Arduino sketch not found"
+          exit 1
+        fi
+
+        # Check that credentials template exists
+        if [ ! -f "credentials.h.example" ]; then
+          echo "ERROR: Credentials template not found"
+          exit 1
+        fi
+
+        # Ensure actual credentials file is not committed
+        if [ -f "credentials.h" ]; then
+          echo "ERROR: credentials.h should not be committed!"
+          exit 1
+        fi
+
+        echo "✓ Arduino project structure is valid"
+
+  validate-docs:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check documentation
+      run: |
+        # Check that required documentation exists
+        required_docs=("README.md" "docs/setup_guide.md" "docs/circuit_diagram.md")
+
+        for doc in "${required_docs[@]}"; do
+          if [ ! -f "$doc" ]; then
+            echo "ERROR: Required documentation $doc not found"
+            exit 1
+          fi
+        done
+
+        echo "✓ All required documentation is present"

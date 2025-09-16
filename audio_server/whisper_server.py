@@ -51,8 +51,11 @@ class WhisperAudioServer:
             self.sample_rate = config.get('sample_rate', 16000)
             self.channels = config.get('channels', 1)
             self.bits_per_sample = config.get('bits_per_sample', 16)
+            self.debug_save_audio = config.get('debug_save_audio', False)
 
             logger.info(f"Configuration loaded from {config_file}")
+            if self.debug_save_audio:
+                logger.info("Debug audio saving enabled")
 
         except FileNotFoundError:
             logger.warning(f"Config file {config_file} not found, using defaults")
@@ -103,12 +106,31 @@ class WhisperAudioServer:
         if not self.is_recording:
             logger.info(f"Started receiving audio from {addr[0]}")
             self.is_recording = True
-            self.audio_buffer.clear()
+            # Safely clear buffer
+            try:
+                self.audio_buffer.clear()
+            except BufferError:
+                self.audio_buffer = bytearray()
 
-        self.audio_buffer.extend(data)
-        self.last_audio_time = current_time
+        try:
+            self.audio_buffer.extend(data)
+            self.last_audio_time = current_time
 
-        logger.debug(f"Received {len(data)} bytes, total buffer: {len(self.audio_buffer)} bytes")
+            logger.debug(f"Received {len(data)} bytes, total buffer: {len(self.audio_buffer)} bytes")
+
+            # Prevent buffer from getting too large (max 30 seconds at 16kHz, 16-bit)
+            max_buffer_size = 30 * self.sample_rate * 2  # 30 seconds of audio
+            if len(self.audio_buffer) > max_buffer_size:
+                logger.warning("Audio buffer too large, truncating...")
+                # Keep only the last 20 seconds
+                keep_size = 20 * self.sample_rate * 2
+                self.audio_buffer = self.audio_buffer[-keep_size:]
+
+        except Exception as e:
+            logger.error(f"Error handling audio data: {e}")
+            # Reset recording state on error
+            self.is_recording = False
+            self.audio_buffer = bytearray()
 
     def check_audio_timeout(self):
         """Check for audio timeout and process buffered audio"""
@@ -129,8 +151,16 @@ class WhisperAudioServer:
         try:
             logger.info(f"Processing {len(self.audio_buffer)} bytes of audio data")
 
+            # Create a copy of the buffer to avoid buffer export issues
+            audio_data = bytes(self.audio_buffer)
+
             # Convert audio buffer to numpy array
-            audio_array = np.frombuffer(self.audio_buffer, dtype=np.int16)
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+
+            # Check if we have enough audio data
+            if len(audio_array) < self.sample_rate:  # Less than 1 second
+                logger.warning("Insufficient audio data for processing")
+                return
 
             # Normalize to float32 [-1, 1] as expected by Whisper
             audio_float = audio_array.astype(np.float32) / 32768.0
@@ -141,24 +171,48 @@ class WhisperAudioServer:
                 audio_float,
                 fp16=False,
                 language='en',
-                task='transcribe'
+                task='transcribe',
+                verbose=False
             )
 
             transcribed_text = result['text'].strip()
-            confidence = result.get('segments', [{}])[0].get('avg_logprob', 0)
+
+            # Safely get confidence score
+            segments = result.get('segments', [])
+            if segments and len(segments) > 0:
+                confidence = segments[0].get('avg_logprob', -1.0)
+            else:
+                confidence = -1.0
 
             logger.info(f"Transcription: '{transcribed_text}' (confidence: {confidence:.2f})")
 
-            if transcribed_text:
+            if transcribed_text and len(transcribed_text) > 2:
                 self.send_text_to_esp32(transcribed_text)
             else:
-                logger.warning("No speech detected in audio")
+                logger.warning("No meaningful speech detected in audio")
+                # Save audio for debugging if enabled
+                debug_save = getattr(self, 'debug_save_audio', False)
+                if debug_save:
+                    self.save_audio_debug("no_speech_detected")
 
         except Exception as e:
             logger.error(f"Error processing audio: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+
+            # Save audio for debugging
+            try:
+                self.save_audio_debug("processing_error")
+            except:
+                pass
         finally:
             self.is_recording = False
-            self.audio_buffer.clear()
+            # Clear buffer safely
+            try:
+                self.audio_buffer.clear()
+            except BufferError:
+                # If buffer is locked, create a new one
+                self.audio_buffer = bytearray()
             self.last_audio_time = 0
 
     def send_text_to_esp32(self, text):
@@ -188,10 +242,14 @@ class WhisperAudioServer:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{filename_prefix}_{timestamp}.wav"
 
+            # Create a copy of the buffer to avoid buffer export issues
+            audio_data = bytes(self.audio_buffer)
+
             # Convert to numpy array
-            audio_array = np.frombuffer(self.audio_buffer, dtype=np.int16)
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
 
             # Save as WAV file
+            import wave
             with wave.open(filename, 'wb') as wav_file:
                 wav_file.setnchannels(self.channels)
                 wav_file.setsampwidth(self.bits_per_sample // 8)

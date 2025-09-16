@@ -1,6 +1,6 @@
 {
   "audio_port": 8080,
-  "esp32_ip": "192.168.4.100",
+  "esp32_ip": "192.168.5.20",
   "esp32_port": 80,
   "whisper_model": "base",
   "sample_rate": 16000,

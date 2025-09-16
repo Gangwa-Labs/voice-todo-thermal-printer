@@ -1,0 +1,21 @@
+# Voice-to-Todo Audio Processing Server Dependencies
+
+# Core dependencies
+numpy>=1.21.0
+requests>=2.28.0
+
+# OpenAI Whisper for speech recognition
+openai-whisper>=20231117
+
+# Audio processing (automatically installed with whisper)
+torch>=1.9.0
+torchaudio>=0.9.0
+
+# Optional: faster audio processing
+scipy>=1.7.0
+
+# Optional: improved audio format support
+soundfile>=0.10.0
+
+# Development and debugging
+matplotlib>=3.5.0  # For audio visualization if needed

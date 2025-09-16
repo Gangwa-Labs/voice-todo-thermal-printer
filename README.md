@@ -87,16 +87,31 @@ pip install -r requirements.txt
 2. Update the ESP32 IP in `audio_server/config.json` after first boot
 
 #### Run the Audio Processing Server
+
+**Easy Start (Recommended):**
+```bash
+./start_audio_server.sh    # On macOS/Linux
+# or
+start_audio_server.bat     # On Windows
+```
+
+**Manual Start:**
 ```bash
 cd audio_server
 python whisper_server.py
 ```
 
+**Auto-discover ESP32 (if IP changed):**
+```bash
+cd audio_server
+python auto_discover_esp32.py
+```
+
 ### 3. Usage
-1. Power on the ESP32S3 device
-2. Start the Python audio server on your computer
-3. Hold the button and speak your todo items
-4. Release the button to process and print
+1. Power on the ESP32S3 device and wait for WiFi connection
+2. Start the Python audio server: `./start_audio_server.sh`
+3. Hold the button on GPIO4 and speak your todo items clearly
+4. Release the button - audio will be processed and todo list printed automatically
 
 ## 🔧 Configuration
 

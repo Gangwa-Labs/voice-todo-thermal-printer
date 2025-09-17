@@ -40,7 +40,26 @@
 
 ## Detailed Wiring Diagrams
 
-### INMP441 Microphone Connection
+### Dual INMP441 Microphone Connection (Stereo Setup)
+```
+INMP441 #1 (Left)         XIAO ESP32S3      INMP441 #2 (Right)
+┌─────────┐               ┌──────────────┐    ┌─────────┐
+│   VDD   │◄─────────────►│ 3.3V         │◄──►│   VDD   │
+│   GND   │◄─────────────►│ GND          │◄──►│   GND   │
+│   WS    │◄─────────────►│ GPIO 6       │◄──►│   WS    │
+│   SCK   │◄─────────────►│ GPIO 5       │◄──►│   SCK   │
+│   SD    │◄─────────────►│ GPIO 9       │◄──►│   SD    │
+│   L/R   │◄─────────────►│ GND          │    │   L/R   │◄──► 3.3V
+└─────────┘               └──────────────┘    └─────────┘
+
+Dual Microphone Wiring:
+- Both microphones share WS, SCK, and SD lines
+- Left mic: L/R → GND (left channel)
+- Right mic: L/R → 3.3V (right channel)
+- Provides stereo audio with noise reduction capabilities
+```
+
+### Alternative: Single Microphone Connection
 ```
 INMP441                    XIAO ESP32S3
 ┌─────────┐               ┌──────────────┐
@@ -52,7 +71,7 @@ INMP441                    XIAO ESP32S3
 │   L/R   │◄─────────────►│ GND          │
 └─────────┘               └──────────────┘
 
-Note: Connect L/R to GND for left channel operation
+Note: Connect L/R to GND for mono operation
 ```
 
 ### Push Button Connection

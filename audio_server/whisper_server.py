@@ -15,6 +15,8 @@ import wave
 import time
 from datetime import datetime
 import logging
+from scipy import signal
+from scipy.ndimage import uniform_filter1d
 
 # Configure logging
 logging.basicConfig(
@@ -162,8 +164,11 @@ class WhisperAudioServer:
                 logger.warning("Insufficient audio data for processing")
                 return
 
+            # Apply advanced audio processing for better quality
+            processed_audio = self.enhance_audio_quality(audio_array)
+
             # Normalize to float32 [-1, 1] as expected by Whisper
-            audio_float = audio_array.astype(np.float32) / 32768.0
+            audio_float = processed_audio.astype(np.float32) / 32768.0
 
             # Use Whisper to transcribe
             logger.info("Running speech recognition...")
@@ -260,6 +265,114 @@ class WhisperAudioServer:
 
         except Exception as e:
             logger.error(f"Failed to save debug audio: {e}")
+
+    def enhance_audio_quality(self, audio_data):
+        """Apply advanced audio processing to improve quality"""
+        try:
+            # Convert to float for processing
+            audio_float = audio_data.astype(np.float64)
+
+            # 1. Noise Reduction using spectral subtraction
+            audio_denoised = self.spectral_subtraction(audio_float)
+
+            # 2. Apply band-pass filter for speech frequencies (300Hz - 3400Hz)
+            audio_filtered = self.apply_speech_filter(audio_denoised)
+
+            # 3. Dynamic range compression
+            audio_compressed = self.apply_compression(audio_filtered)
+
+            # 4. Automatic gain control
+            audio_agc = self.apply_agc(audio_compressed)
+
+            # 5. Speech enhancement using Wiener filtering
+            audio_enhanced = self.wiener_filter(audio_agc)
+
+            # Convert back to int16
+            audio_enhanced = np.clip(audio_enhanced, -32768, 32767).astype(np.int16)
+
+            logger.debug("Audio enhancement applied successfully")
+            return audio_enhanced
+
+        except Exception as e:
+            logger.warning(f"Audio enhancement failed, using original: {e}")
+            return audio_data
+
+    def spectral_subtraction(self, audio):
+        """Reduce noise using spectral subtraction"""
+        # Estimate noise from first 0.5 seconds (assumed to be mostly noise)
+        noise_samples = min(int(0.5 * self.sample_rate), len(audio) // 4)
+        noise_estimate = np.mean(np.abs(audio[:noise_samples])) * 1.5
+
+        # Apply spectral subtraction
+        cleaned = audio.copy()
+        mask = np.abs(cleaned) < noise_estimate
+        cleaned[mask] *= 0.1  # Reduce noise components
+
+        return cleaned
+
+    def apply_speech_filter(self, audio):
+        """Apply band-pass filter for speech frequencies"""
+        nyquist = self.sample_rate / 2
+        low_freq = 300 / nyquist   # 300 Hz
+        high_freq = 3400 / nyquist # 3400 Hz
+
+        # Design band-pass filter
+        b, a = signal.butter(4, [low_freq, high_freq], btype='band')
+        filtered = signal.filtfilt(b, a, audio)
+
+        return filtered
+
+    def apply_compression(self, audio):
+        """Apply dynamic range compression"""
+        # Simple soft knee compression
+        threshold = 0.7 * np.max(np.abs(audio))
+        ratio = 4.0  # 4:1 compression ratio
+
+        compressed = audio.copy()
+        mask = np.abs(compressed) > threshold
+
+        # Apply compression to samples above threshold
+        excess = np.abs(compressed[mask]) - threshold
+        compressed[mask] = np.sign(compressed[mask]) * (threshold + excess / ratio)
+
+        return compressed
+
+    def apply_agc(self, audio):
+        """Apply automatic gain control"""
+        # Target RMS level
+        target_rms = 0.15 * 32768
+
+        # Calculate current RMS
+        current_rms = np.sqrt(np.mean(audio**2))
+
+        if current_rms > 0:
+            # Apply gain to reach target RMS
+            gain = target_rms / current_rms
+            # Limit gain to prevent over-amplification
+            gain = min(gain, 3.0)  # Max 3x gain
+            audio = audio * gain
+
+        return audio
+
+    def wiener_filter(self, audio):
+        """Apply Wiener filtering for speech enhancement"""
+        # Simple Wiener filter implementation
+        # Estimate signal and noise power spectral densities
+        window_size = min(512, len(audio) // 8)
+
+        # Smooth the signal for noise estimation
+        smoothed = uniform_filter1d(np.abs(audio), size=window_size, mode='nearest')
+
+        # Calculate Wiener filter coefficients
+        signal_power = smoothed**2
+        noise_power = np.mean(signal_power[:window_size])  # Estimate from beginning
+
+        wiener_gain = signal_power / (signal_power + noise_power)
+
+        # Apply filter
+        enhanced = audio * wiener_gain
+
+        return enhanced
 
     def run(self):
         """Main server loop"""

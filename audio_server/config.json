@@ -8,5 +8,17 @@
   "bits_per_sample": 16,
   "audio_timeout": 2.0,
   "debug_save_audio": false,
-  "log_level": "INFO"
+  "log_level": "INFO",
+  "audio_enhancement": {
+    "enable_noise_reduction": true,
+    "enable_speech_filter": true,
+    "enable_compression": true,
+    "enable_agc": true,
+    "enable_wiener_filter": true,
+    "noise_reduction_strength": 0.7,
+    "speech_filter_low": 300,
+    "speech_filter_high": 3400,
+    "compression_ratio": 4.0,
+    "agc_target_level": 0.15
+  }
 }

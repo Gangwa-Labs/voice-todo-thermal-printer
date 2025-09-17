@@ -20,13 +20,24 @@ A smart thermal printer system that converts your voice into printed todo lists 
 - **Breadboard and jumper wires**
 
 ### Pin Configuration
+
+#### Dual Microphone Setup (Recommended for Best Quality)
 ```
-INMP441 Microphone:
+INMP441 Left Microphone:
 - WS (Word Select) → GPIO 6
 - SCK (Serial Clock) → GPIO 5
 - SD (Serial Data) → GPIO 9
 - VDD → 3.3V
 - GND → GND
+- L/R → GND (Left channel)
+
+INMP441 Right Microphone:
+- WS (Word Select) → GPIO 6 (shared)
+- SCK (Serial Clock) → GPIO 5 (shared)
+- SD (Serial Data) → GPIO 9 (shared)
+- VDD → 3.3V
+- GND → GND
+- L/R → 3.3V (Right channel)
 
 Push Button:
 - One side → GPIO 4
@@ -38,6 +49,17 @@ Thermal Printer:
 - TX → GPIO 43
 - VCC → 5V
 - GND → GND
+```
+
+#### Single Microphone Setup (Alternative)
+```
+INMP441 Microphone:
+- WS (Word Select) → GPIO 6
+- SCK (Serial Clock) → GPIO 5
+- SD (Serial Data) → GPIO 9
+- VDD → 3.3V
+- GND → GND
+- L/R → GND
 ```
 
 ## 📁 Project Structure

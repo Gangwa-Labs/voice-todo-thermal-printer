@@ -17,5 +17,9 @@ scipy>=1.7.0
 # Optional: improved audio format support
 soundfile>=0.10.0
 
+# Advanced audio processing
+noisereduce>=3.0.0  # Advanced noise reduction
+librosa>=0.10.0     # Audio analysis and processing
+
 # Development and debugging
 matplotlib>=3.5.0  # For audio visualization if needed

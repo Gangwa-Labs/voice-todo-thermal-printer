@@ -11,16 +11,21 @@ const int printerBaudrate = 9600;
 const byte rxPin = 44;  // XIAO ESP32S3 RX pin
 const byte txPin = 43;  // XIAO ESP32S3 TX pin
 
-// INMP441 microphone configuration
-const int I2S_WS = 6;   // Word Select (LRCLK)
-const int I2S_SCK = 5;  // Serial Clock (BCLK)
-const int I2S_SD = 9;   // Serial Data (DIN)
+// Dual INMP441 microphone configuration
+const int I2S_WS = 6;   // Word Select (LRCLK) - shared
+const int I2S_SCK = 5;  // Serial Clock (BCLK) - shared
+const int I2S_SD = 9;   // Serial Data (DIN) - shared data line
 const int BUTTON_PIN = 4; // Push button pin (active high)
 
-// Audio configuration
+// Audio configuration for stereo recording
 const int SAMPLE_RATE = 16000;
 const int BITS_PER_SAMPLE = 16;
-const size_t BUFFER_SIZE = 1024;
+const size_t BUFFER_SIZE = 2048;  // Increased for stereo data
+const int CHANNELS = 2;  // Stereo for dual microphones
+
+// Audio processing settings
+const int NOISE_GATE_THRESHOLD = 500;  // Minimum amplitude to process
+const int AUDIO_GAIN = 2;  // Digital gain multiplier
 
 // Network configuration for audio streaming
 // AUDIO_SERVER_IP is defined in credentials.h
@@ -80,12 +85,12 @@ void initializeI2S() {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,  // Stereo for dual mics
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 8,
     .dma_buf_len = BUFFER_SIZE,
-    .use_apll = false,
+    .use_apll = true,  // Use APLL for better audio quality
     .tx_desc_auto_clear = false,
     .fixed_mclk = 0
   };
@@ -97,9 +102,25 @@ void initializeI2S() {
     .data_in_num = I2S_SD
   };
 
-  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_NUM_0, &pin_config);
+  // Install and configure I2S driver
+  esp_err_t ret = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  if (ret != ESP_OK) {
+    Serial.printf("Failed to install I2S driver: %s\n", esp_err_to_name(ret));
+    return;
+  }
+
+  ret = i2s_set_pin(I2S_NUM_0, &pin_config);
+  if (ret != ESP_OK) {
+    Serial.printf("Failed to set I2S pins: %s\n", esp_err_to_name(ret));
+    return;
+  }
+
   i2s_zero_dma_buffer(I2S_NUM_0);
+
+  // Set I2S sample rates for better quality
+  i2s_set_sample_rates(I2S_NUM_0, SAMPLE_RATE);
+
+  Serial.println("I2S initialized for stereo dual-microphone recording");
 }
 
 void handleButtonPress() {
@@ -130,16 +151,67 @@ void streamAudioData() {
   if (!isRecording) return;
 
   size_t bytes_read = 0;
-  int16_t audio_buffer[BUFFER_SIZE];
+  int32_t raw_buffer[BUFFER_SIZE / 2];  // I2S reads 32-bit samples in stereo mode
 
-  esp_err_t result = i2s_read(I2S_NUM_0, audio_buffer, sizeof(audio_buffer), &bytes_read, portMAX_DELAY);
+  esp_err_t result = i2s_read(I2S_NUM_0, raw_buffer, sizeof(raw_buffer), &bytes_read, portMAX_DELAY);
 
   if (result == ESP_OK && bytes_read > 0) {
-    // Send audio data via UDP to processing computer
-    udp.beginPacket(AUDIO_SERVER_IP, AUDIO_SERVER_PORT);
-    udp.write((uint8_t*)audio_buffer, bytes_read);
-    udp.endPacket();
+    // Process stereo audio data
+    int16_t processed_buffer[BUFFER_SIZE];
+    size_t processed_samples = processAudioData(raw_buffer, processed_buffer, bytes_read / 4);
+
+    // Apply noise gate to reduce interference
+    bool hasValidAudio = false;
+    for (size_t i = 0; i < processed_samples; i++) {
+      if (abs(processed_buffer[i]) > NOISE_GATE_THRESHOLD) {
+        hasValidAudio = true;
+        break;
+      }
+    }
+
+    // Only send audio if it passes the noise gate
+    if (hasValidAudio) {
+      udp.beginPacket(AUDIO_SERVER_IP, AUDIO_SERVER_PORT);
+      udp.write((uint8_t*)processed_buffer, processed_samples * 2);
+      udp.endPacket();
+    }
   }
+}
+
+size_t processAudioData(int32_t* raw_data, int16_t* output, size_t sample_count) {
+  // Convert 32-bit stereo I2S data to enhanced 16-bit mono
+  size_t output_samples = 0;
+
+  for (size_t i = 0; i < sample_count; i++) {
+    // Extract left and right channels from 32-bit I2S data
+    int16_t left = (raw_data[i] >> 16) & 0xFFFF;   // Upper 16 bits
+    int16_t right = raw_data[i] & 0xFFFF;          // Lower 16 bits
+
+    // Apply differential noise reduction (subtract common noise)
+    int32_t differential = (int32_t)left - (int32_t)right;
+
+    // Mix channels with emphasis on differential signal for noise reduction
+    int32_t mixed = ((int32_t)left + (int32_t)right) / 2 + (differential / 4);
+
+    // Apply digital gain
+    mixed *= AUDIO_GAIN;
+
+    // Clip to 16-bit range
+    if (mixed > 32767) mixed = 32767;
+    if (mixed < -32768) mixed = -32768;
+
+    // Simple high-pass filter to remove low-frequency noise
+    static int32_t prev_input = 0;
+    static int32_t prev_output = 0;
+
+    int32_t filtered = mixed - prev_input + (prev_output * 0.95);
+    prev_input = mixed;
+    prev_output = filtered;
+
+    output[output_samples++] = (int16_t)filtered;
+  }
+
+  return output_samples;
 }
 
 void setup() {

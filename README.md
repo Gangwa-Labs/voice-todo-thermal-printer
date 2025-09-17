@@ -129,6 +129,13 @@ cd audio_server
 python auto_discover_esp32.py
 ```
 
+**Test Audio Capture:**
+```bash
+python test_audio_system.py
+# or
+python examples/audio_capture_test.py
+```
+
 ### 3. Usage
 1. Power on the ESP32S3 device and wait for WiFi connection
 2. Start the Python audio server: `./start_audio_server.sh`

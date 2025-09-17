@@ -20,12 +20,13 @@ const int BUTTON_PIN = 4; // Push button pin (active high)
 // Audio configuration for stereo recording
 const int SAMPLE_RATE = 16000;
 const int BITS_PER_SAMPLE = 16;
-const size_t BUFFER_SIZE = 2048;  // Increased for stereo data
-const int CHANNELS = 2;  // Stereo for dual microphones
+const size_t BUFFER_SIZE = 512;   // Reduced to meet ESP32 I2S limits (max 1024)
+const int DMA_BUF_COUNT = 4;      // Number of DMA buffers
+const int CHANNELS = 2;           // Stereo for dual microphones
 
 // Audio processing settings
-const int NOISE_GATE_THRESHOLD = 500;  // Minimum amplitude to process
-const int AUDIO_GAIN = 2;  // Digital gain multiplier
+const int NOISE_GATE_THRESHOLD = 300;  // Minimum amplitude to process
+const int AUDIO_GAIN = 1;              // Reduced gain to prevent overflow
 
 // Network configuration for audio streaming
 // AUDIO_SERVER_IP is defined in credentials.h
@@ -81,6 +82,7 @@ const char* encouragementPhrases[] = {
 };
 
 void initializeI2S() {
+  // Conservative I2S configuration to prevent crashes
   i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
@@ -88,9 +90,9 @@ void initializeI2S() {
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,  // Stereo for dual mics
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = BUFFER_SIZE,
-    .use_apll = true,  // Use APLL for better audio quality
+    .dma_buf_count = DMA_BUF_COUNT,  // Use defined constant
+    .dma_buf_len = BUFFER_SIZE,      // Within ESP32 limits (≤1024)
+    .use_apll = false,               // Disable APLL to prevent instability
     .tx_desc_auto_clear = false,
     .fixed_mclk = 0
   };
@@ -102,11 +104,20 @@ void initializeI2S() {
     .data_in_num = I2S_SD
   };
 
-  // Install and configure I2S driver
+  // Install I2S driver with error checking
   esp_err_t ret = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
   if (ret != ESP_OK) {
     Serial.printf("Failed to install I2S driver: %s\n", esp_err_to_name(ret));
-    return;
+    Serial.println("Retrying with simpler configuration...");
+
+    // Fallback to mono configuration
+    i2s_config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+    ret = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+
+    if (ret != ESP_OK) {
+      Serial.printf("I2S driver install failed completely: %s\n", esp_err_to_name(ret));
+      return;
+    }
   }
 
   ret = i2s_set_pin(I2S_NUM_0, &pin_config);
@@ -115,15 +126,17 @@ void initializeI2S() {
     return;
   }
 
+  // Clear DMA buffers
   i2s_zero_dma_buffer(I2S_NUM_0);
 
-  // Set I2S sample rates for better quality
-  i2s_set_sample_rates(I2S_NUM_0, SAMPLE_RATE);
-
-  Serial.println("I2S initialized for stereo dual-microphone recording");
+  Serial.println("I2S initialized successfully");
+  Serial.printf("Configuration: %dHz, %d-bit, %s\n",
+                SAMPLE_RATE, BITS_PER_SAMPLE,
+                (i2s_config.channel_format == I2S_CHANNEL_FMT_RIGHT_LEFT) ? "Stereo" : "Mono");
 }
 
 void handleButtonPress() {
+  // Safe button handling with error checking
   bool currentButtonState = digitalRead(BUTTON_PIN);
 
   if (currentButtonState != lastButtonState) {
@@ -131,8 +144,16 @@ void handleButtonPress() {
       // Button pressed - start recording
       if (!isRecording) {
         Serial.println("Button pressed - starting audio recording");
-        isRecording = true;
-        buttonPressed = true;
+
+        // Additional safety: ensure I2S is ready
+        if (i2s_zero_dma_buffer(I2S_NUM_0) == ESP_OK) {
+          isRecording = true;
+          buttonPressed = true;
+          Serial.println("Audio recording started successfully");
+        } else {
+          Serial.println("Warning: I2S buffer clear failed");
+          isRecording = false;
+        }
       }
     } else {
       // Button released - stop recording
@@ -140,6 +161,9 @@ void handleButtonPress() {
         Serial.println("Button released - stopping audio recording");
         isRecording = false;
         buttonPressed = false;
+
+        // Small delay to ensure last packets are sent
+        delay(100);
       }
     }
     lastButtonState = currentButtonState;
@@ -151,68 +175,62 @@ void streamAudioData() {
   if (!isRecording) return;
 
   size_t bytes_read = 0;
-  int32_t raw_buffer[BUFFER_SIZE / 2];  // I2S reads 32-bit samples in stereo mode
+  int16_t audio_buffer[BUFFER_SIZE * CHANNELS];  // Buffer for stereo or mono data
 
-  esp_err_t result = i2s_read(I2S_NUM_0, raw_buffer, sizeof(raw_buffer), &bytes_read, portMAX_DELAY);
+  // Read audio data with timeout to prevent blocking
+  esp_err_t result = i2s_read(I2S_NUM_0, audio_buffer, sizeof(audio_buffer), &bytes_read, 10 / portTICK_PERIOD_MS);
 
   if (result == ESP_OK && bytes_read > 0) {
-    // Process stereo audio data
-    int16_t processed_buffer[BUFFER_SIZE];
-    size_t processed_samples = processAudioData(raw_buffer, processed_buffer, bytes_read / 4);
+    // Simple processing to prevent crashes
+    size_t samples = bytes_read / 2;  // 16-bit samples
 
-    // Apply noise gate to reduce interference
+    // Convert stereo to mono and apply simple processing
+    int16_t processed_buffer[BUFFER_SIZE];
+    size_t output_samples = 0;
+
+    for (size_t i = 0; i < samples; i += CHANNELS) {
+      int32_t sample;
+
+      if (CHANNELS == 2 && i + 1 < samples) {
+        // Stereo: mix left and right channels
+        sample = ((int32_t)audio_buffer[i] + (int32_t)audio_buffer[i + 1]) / 2;
+      } else {
+        // Mono: use single channel
+        sample = audio_buffer[i];
+      }
+
+      // Apply simple gain
+      sample *= AUDIO_GAIN;
+
+      // Clip to prevent overflow
+      if (sample > 32767) sample = 32767;
+      if (sample < -32768) sample = -32768;
+
+      processed_buffer[output_samples++] = (int16_t)sample;
+
+      if (output_samples >= BUFFER_SIZE) break;
+    }
+
+    // Apply noise gate
     bool hasValidAudio = false;
-    for (size_t i = 0; i < processed_samples; i++) {
+    for (size_t i = 0; i < output_samples; i++) {
       if (abs(processed_buffer[i]) > NOISE_GATE_THRESHOLD) {
         hasValidAudio = true;
         break;
       }
     }
 
-    // Only send audio if it passes the noise gate
-    if (hasValidAudio) {
+    // Send audio data if it passes noise gate
+    if (hasValidAudio && output_samples > 0) {
       udp.beginPacket(AUDIO_SERVER_IP, AUDIO_SERVER_PORT);
-      udp.write((uint8_t*)processed_buffer, processed_samples * 2);
+      udp.write((uint8_t*)processed_buffer, output_samples * 2);
       udp.endPacket();
     }
   }
 }
 
-size_t processAudioData(int32_t* raw_data, int16_t* output, size_t sample_count) {
-  // Convert 32-bit stereo I2S data to enhanced 16-bit mono
-  size_t output_samples = 0;
-
-  for (size_t i = 0; i < sample_count; i++) {
-    // Extract left and right channels from 32-bit I2S data
-    int16_t left = (raw_data[i] >> 16) & 0xFFFF;   // Upper 16 bits
-    int16_t right = raw_data[i] & 0xFFFF;          // Lower 16 bits
-
-    // Apply differential noise reduction (subtract common noise)
-    int32_t differential = (int32_t)left - (int32_t)right;
-
-    // Mix channels with emphasis on differential signal for noise reduction
-    int32_t mixed = ((int32_t)left + (int32_t)right) / 2 + (differential / 4);
-
-    // Apply digital gain
-    mixed *= AUDIO_GAIN;
-
-    // Clip to 16-bit range
-    if (mixed > 32767) mixed = 32767;
-    if (mixed < -32768) mixed = -32768;
-
-    // Simple high-pass filter to remove low-frequency noise
-    static int32_t prev_input = 0;
-    static int32_t prev_output = 0;
-
-    int32_t filtered = mixed - prev_input + (prev_output * 0.95);
-    prev_input = mixed;
-    prev_output = filtered;
-
-    output[output_samples++] = (int16_t)filtered;
-  }
-
-  return output_samples;
-}
+// Removed complex audio processing function to prevent crashes
+// Audio processing is now simplified and integrated into streamAudioData()
 
 void setup() {
   Serial.begin(115200);

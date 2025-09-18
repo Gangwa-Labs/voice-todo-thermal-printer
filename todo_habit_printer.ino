@@ -2,8 +2,7 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <HardwareSerial.h>
-#include <driver/i2s.h>
-#include <WiFiUdp.h>
+#include <EEPROM.h>
 #include "credentials.h"  // Include WiFi credentials (not committed to Git)
 
 // Thermal printer configuration
@@ -11,35 +10,24 @@ const int printerBaudrate = 9600;
 const byte rxPin = 44;  // XIAO ESP32S3 RX pin
 const byte txPin = 43;  // XIAO ESP32S3 TX pin
 
-// Dual INMP441 microphone configuration
-const int I2S_WS = 6;   // Word Select (LRCLK) - shared
-const int I2S_SCK = 5;  // Serial Clock (BCLK) - shared
-const int I2S_SD = 9;   // Serial Data (DIN) - shared data line
-const int BUTTON_PIN = 4; // Push button pin (active high)
-
-// Audio configuration for stereo recording
-const int SAMPLE_RATE = 16000;
-const int BITS_PER_SAMPLE = 16;
-const size_t BUFFER_SIZE = 512;   // Reduced to meet ESP32 I2S limits (max 1024)
-const int DMA_BUF_COUNT = 4;      // Number of DMA buffers
-const int CHANNELS = 2;           // Stereo for dual microphones
-
-// Audio processing settings
-const int NOISE_GATE_THRESHOLD = 300;  // Minimum amplitude to process
-const int AUDIO_GAIN = 1;              // Reduced gain to prevent overflow
-
-// Network configuration for audio streaming
-// AUDIO_SERVER_IP is defined in credentials.h
-const int AUDIO_SERVER_PORT = 8080;
-
 HardwareSerial printerSerial(1);
 WebServer server(80);
-WiFiUDP udp;
 
-// Audio streaming variables
-bool isRecording = false;
-bool buttonPressed = false;
-bool lastButtonState = false;
+// Core habits storage configuration
+#define EEPROM_SIZE 512
+#define CORE_HABITS_START_ADDR 0
+#define MAX_HABIT_NAME_LENGTH 50
+#define MAX_CORE_HABITS 10
+
+// Core habits structure
+struct CoreHabit {
+  char name[MAX_HABIT_NAME_LENGTH];
+  bool enabled;
+};
+
+// Core habits array
+CoreHabit coreHabits[MAX_CORE_HABITS];
+int coreHabitsCount = 0;
 
 // Date arrays
 const char* months[] = {"January", "February", "March", "April", "May", "June",
@@ -81,163 +69,77 @@ const char* encouragementPhrases[] = {
   "Keep building, keep growing!"
 };
 
-void initializeI2S() {
-  // Conservative I2S configuration to prevent crashes
-  i2s_config_t i2s_config = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-    .sample_rate = SAMPLE_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,  // Stereo for dual mics
-    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = DMA_BUF_COUNT,  // Use defined constant
-    .dma_buf_len = BUFFER_SIZE,      // Within ESP32 limits (≤1024)
-    .use_apll = false,               // Disable APLL to prevent instability
-    .tx_desc_auto_clear = false,
-    .fixed_mclk = 0
-  };
+// Core habits management functions
+void initializeCoreHabits() {
+  // Initialize EEPROM
+  EEPROM.begin(EEPROM_SIZE);
 
-  i2s_pin_config_t pin_config = {
-    .bck_io_num = I2S_SCK,
-    .ws_io_num = I2S_WS,
-    .data_out_num = I2S_PIN_NO_CHANGE,
-    .data_in_num = I2S_SD
-  };
+  // Try to load existing core habits from EEPROM
+  loadCoreHabits();
 
-  // Install I2S driver with error checking
-  esp_err_t ret = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-  if (ret != ESP_OK) {
-    Serial.printf("Failed to install I2S driver: %s\n", esp_err_to_name(ret));
-    Serial.println("Retrying with simpler configuration...");
+  // If no habits found, initialize with defaults
+  if (coreHabitsCount == 0) {
+    setupDefaultCoreHabits();
+    saveCoreHabits();
+  }
+}
 
-    // Fallback to mono configuration
-    i2s_config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
-    ret = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+void setupDefaultCoreHabits() {
+  const char* defaultHabits[] = {"Breakfast", "Lunch", "Dinner", "Meditation", "Exercise"};
+  coreHabitsCount = 5;
 
-    if (ret != ESP_OK) {
-      Serial.printf("I2S driver install failed completely: %s\n", esp_err_to_name(ret));
-      return;
-    }
+  for (int i = 0; i < coreHabitsCount; i++) {
+    strncpy(coreHabits[i].name, defaultHabits[i], MAX_HABIT_NAME_LENGTH - 1);
+    coreHabits[i].name[MAX_HABIT_NAME_LENGTH - 1] = '\0';
+    coreHabits[i].enabled = true;
+  }
+}
+
+void saveCoreHabits() {
+  int addr = CORE_HABITS_START_ADDR;
+
+  // Save count
+  EEPROM.write(addr, coreHabitsCount);
+  addr++;
+
+  // Save each habit
+  for (int i = 0; i < coreHabitsCount; i++) {
+    EEPROM.put(addr, coreHabits[i]);
+    addr += sizeof(CoreHabit);
   }
 
-  ret = i2s_set_pin(I2S_NUM_0, &pin_config);
-  if (ret != ESP_OK) {
-    Serial.printf("Failed to set I2S pins: %s\n", esp_err_to_name(ret));
+  EEPROM.commit();
+  Serial.println("Core habits saved to EEPROM");
+}
+
+void loadCoreHabits() {
+  int addr = CORE_HABITS_START_ADDR;
+
+  // Load count
+  coreHabitsCount = EEPROM.read(addr);
+  addr++;
+
+  // Validate count
+  if (coreHabitsCount < 0 || coreHabitsCount > MAX_CORE_HABITS) {
+    coreHabitsCount = 0;
     return;
   }
 
-  // Clear DMA buffers
-  i2s_zero_dma_buffer(I2S_NUM_0);
-
-  Serial.println("I2S initialized successfully");
-  Serial.printf("Configuration: %dHz, %d-bit, %s\n",
-                SAMPLE_RATE, BITS_PER_SAMPLE,
-                (i2s_config.channel_format == I2S_CHANNEL_FMT_RIGHT_LEFT) ? "Stereo" : "Mono");
-}
-
-void handleButtonPress() {
-  // Safe button handling with error checking
-  bool currentButtonState = digitalRead(BUTTON_PIN);
-
-  if (currentButtonState != lastButtonState) {
-    if (currentButtonState == HIGH) {
-      // Button pressed - start recording
-      if (!isRecording) {
-        Serial.println("Button pressed - starting audio recording");
-
-        // Additional safety: ensure I2S is ready
-        if (i2s_zero_dma_buffer(I2S_NUM_0) == ESP_OK) {
-          isRecording = true;
-          buttonPressed = true;
-          Serial.println("Audio recording started successfully");
-        } else {
-          Serial.println("Warning: I2S buffer clear failed");
-          isRecording = false;
-        }
-      }
-    } else {
-      // Button released - stop recording
-      if (isRecording) {
-        Serial.println("Button released - stopping audio recording");
-        isRecording = false;
-        buttonPressed = false;
-
-        // Small delay to ensure last packets are sent
-        delay(100);
-      }
-    }
-    lastButtonState = currentButtonState;
-    delay(50); // Debounce
+  // Load each habit
+  for (int i = 0; i < coreHabitsCount; i++) {
+    EEPROM.get(addr, coreHabits[i]);
+    addr += sizeof(CoreHabit);
   }
+
+  Serial.println("Core habits loaded from EEPROM: " + String(coreHabitsCount) + " habits");
 }
-
-void streamAudioData() {
-  if (!isRecording) return;
-
-  size_t bytes_read = 0;
-  int16_t audio_buffer[BUFFER_SIZE * CHANNELS];  // Buffer for stereo or mono data
-
-  // Read audio data with timeout to prevent blocking
-  esp_err_t result = i2s_read(I2S_NUM_0, audio_buffer, sizeof(audio_buffer), &bytes_read, 10 / portTICK_PERIOD_MS);
-
-  if (result == ESP_OK && bytes_read > 0) {
-    // Simple processing to prevent crashes
-    size_t samples = bytes_read / 2;  // 16-bit samples
-
-    // Convert stereo to mono and apply simple processing
-    int16_t processed_buffer[BUFFER_SIZE];
-    size_t output_samples = 0;
-
-    for (size_t i = 0; i < samples; i += CHANNELS) {
-      int32_t sample;
-
-      if (CHANNELS == 2 && i + 1 < samples) {
-        // Stereo: mix left and right channels
-        sample = ((int32_t)audio_buffer[i] + (int32_t)audio_buffer[i + 1]) / 2;
-      } else {
-        // Mono: use single channel
-        sample = audio_buffer[i];
-      }
-
-      // Apply simple gain
-      sample *= AUDIO_GAIN;
-
-      // Clip to prevent overflow
-      if (sample > 32767) sample = 32767;
-      if (sample < -32768) sample = -32768;
-
-      processed_buffer[output_samples++] = (int16_t)sample;
-
-      if (output_samples >= BUFFER_SIZE) break;
-    }
-
-    // Apply noise gate
-    bool hasValidAudio = false;
-    for (size_t i = 0; i < output_samples; i++) {
-      if (abs(processed_buffer[i]) > NOISE_GATE_THRESHOLD) {
-        hasValidAudio = true;
-        break;
-      }
-    }
-
-    // Send audio data if it passes noise gate
-    if (hasValidAudio && output_samples > 0) {
-      udp.beginPacket(AUDIO_SERVER_IP, AUDIO_SERVER_PORT);
-      udp.write((uint8_t*)processed_buffer, output_samples * 2);
-      udp.endPacket();
-    }
-  }
-}
-
-// Removed complex audio processing function to prevent crashes
-// Audio processing is now simplified and integrated into streamAudioData()
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  // Initialize button pin
-  pinMode(BUTTON_PIN, INPUT);
+  // Initialize core habits system
+  initializeCoreHabits();
 
   // Initialize thermal printer
   printerSerial.begin(printerBaudrate, SERIAL_8N1, rxPin, txPin);
@@ -254,26 +156,21 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
-  // Initialize I2S for microphone
-  initializeI2S();
-  Serial.println("INMP441 microphone initialized");
-
   // Setup web server routes
   server.on("/", HTTP_GET, handleRoot);
   server.on("/print-todo", HTTP_POST, handlePrintTodo);
   server.on("/print-habit", HTTP_POST, handlePrintHabit);
   server.on("/status", HTTP_GET, handleStatus);
-  server.on("/receive-text", HTTP_POST, handleReceiveText);
+  server.on("/core-habits", HTTP_GET, handleGetCoreHabits);
+  server.on("/core-habits", HTTP_POST, handleUpdateCoreHabits);
 
   server.enableCORS(true);
   server.begin();
-  Serial.println("HTTP server started - To-Do List & Habit Tracker with Audio Ready!");
+  Serial.println("HTTP server started - To-Do List & Habit Tracker Ready!");
 }
 
 void loop() {
   server.handleClient();
-  handleButtonPress();
-  streamAudioData();
 }
 
 void initializePrinter() {
@@ -296,8 +193,32 @@ void initializePrinter() {
 }
 
 void printLine(String text) {
-  printerSerial.print(text);
-  printerSerial.write('\n');
+  // Split long text into lines if needed to prevent word cutoff
+  int lineWidth = 32; // Approximate characters per line for thermal printer
+  if (text.length() <= lineWidth) {
+    printerSerial.print(text);
+    printerSerial.write('\n');
+  } else {
+    int start = 0;
+    while (start < text.length()) {
+      int end = start + lineWidth;
+      if (end >= text.length()) {
+        // Last part of the text
+        printerSerial.print(text.substring(start));
+        printerSerial.write('\n');
+        break;
+      } else {
+        // Find last space before line limit to avoid cutting words
+        int lastSpace = text.lastIndexOf(' ', end);
+        if (lastSpace > start) {
+          end = lastSpace;
+        }
+        printerSerial.print(text.substring(start, end));
+        printerSerial.write('\n');
+        start = end + 1; // Skip the space
+      }
+    }
+  }
 }
 
 void setAlignment(char align) {
@@ -372,8 +293,12 @@ void handleRoot() {
   html += "label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }";
   html += "input, select, textarea { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 16px; box-sizing: border-box; }";
   html += "textarea { height: 80px; resize: vertical; }";
-  html += ".todo-item { display: flex; align-items: center; margin-bottom: 10px; padding: 10px; background-color: #f8f9fa; border-radius: 5px; }";
+  html += ".todo-item { display: flex; align-items: center; margin-bottom: 10px; padding: 10px; background-color: #f8f9fa; border-radius: 5px; cursor: move; }";
+  html += ".todo-item.dragging { opacity: 0.5; }";
   html += ".todo-item input[type='text'] { flex: 1; margin-right: 10px; }";
+  html += ".drag-handle { margin-right: 10px; cursor: grab; user-select: none; color: #6c757d; font-size: 18px; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; }";
+  html += ".drag-handle:active { cursor: grabbing; }";
+  html += ".drag-handle:hover { background-color: #e9ecef; border-radius: 3px; }";
   html += ".remove-btn { background-color: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; }";
   html += ".remove-btn:hover { background-color: #c82333; }";
 
@@ -395,22 +320,27 @@ void handleRoot() {
   html += ".preview-item { font-family: monospace; margin: 5px 0; }";
   html += ".checkbox-option { display: flex; align-items: center; margin: 10px 0; }";
   html += ".checkbox-option input { width: auto; margin-right: 10px; }";
+  html += ".core-habit-item { display: flex; align-items: center; padding: 8px; background-color: #e8f4fd; border-radius: 4px; margin: 5px 0; }";
+  html += ".core-habit-item input[type='checkbox'] { margin-right: 10px; }";
+  html += ".core-habit-item input[type='text'] { flex: 1; border: 1px solid #ccc; padding: 5px; margin-right: 10px; }";
+  html += ".core-habit-item button { background-color: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; }";
+  html += ".core-habit-item button:hover { background-color: #c82333; }";
   html += "</style></head><body>";
 
   html += "<div class='container'>";
-  html += "<h1>📝 Daily To-Do & Habit Tracker</h1>";
+  html += "<h1>Daily To-Do & Habit Tracker</h1>";
 
   // Tab navigation
   html += "<div class='tab-container'>";
   html += "<div class='tab-buttons'>";
-  html += "<button class='tab-button active' onclick='showTab(\"todo\")'>📋 To-Do List</button>";
-  html += "<button class='tab-button' onclick='showTab(\"habit\")'>🎯 Habit Tracker</button>";
+  html += "<button class='tab-button active' onclick='showTab(\"todo\")'>To-Do List</button>";
+  html += "<button class='tab-button' onclick='showTab(\"habit\")'>Habit Tracker</button>";
   html += "</div></div>";
 
   // To-Do Tab Content
   html += "<div id='todo-tab' class='tab-content active'>";
   html += "<div class='date-section'>";
-  html += "<h3>📅 Date Settings</h3>";
+  html += "<h3>Date Settings</h3>";
   html += "<div class='form-group'>";
   html += "<label for='customDate'>Select Date:</label>";
   html += "<input type='date' id='customDate'>";
@@ -423,10 +353,20 @@ void handleRoot() {
   html += "<input type='text' id='todoTitle' placeholder='My Daily Tasks'>";
   html += "</div>";
 
+  // Core habits section
   html += "<div class='form-group'>";
-  html += "<label>To-Do Items:</label>";
+  html += "<label>Core Habits (always included):</label>";
+  html += "<div id='coreHabits' style='margin-bottom: 15px;'>";
+  html += "<div style='color: #6c757d; font-style: italic; padding: 10px;'>Loading core habits...</div>";
+  html += "</div>";
+  html += "<button type='button' onclick='editCoreHabits()' style='background-color: #6c757d; margin-bottom: 10px;'>Edit Core Habits</button>";
+  html += "</div>";
+
+  html += "<div class='form-group'>";
+  html += "<label>To-Do Items (drag to reorder):</label>";
   html += "<div id='todoItems'>";
-  html += "<div class='todo-item'>";
+  html += "<div class='todo-item' draggable='true'>";
+  html += "<span class='drag-handle'>=</span>";
   html += "<input type='text' placeholder='Enter a task...' class='todo-input'>";
   html += "<button class='remove-btn' onclick='removeTodoItem(this)'>Remove</button>";
   html += "</div>";
@@ -435,11 +375,11 @@ void handleRoot() {
   html += "</div>";
 
   html += "<div class='preview' id='todo-preview'>";
-  html += "<h3>📄 Print Preview</h3>";
+  html += "<h3>Print Preview</h3>";
   html += "<div id='todoPreviewContent'>Select a date and add items to see preview</div>";
   html += "</div>";
 
-  html += "<button class='print-btn' onclick='printTodoList()'>🖨️ Print To-Do List</button>";
+  html += "<button class='print-btn' onclick='printTodoList()'>Print To-Do List</button>";
   html += "</div>";
 
   // Habit Tracker Tab Content
@@ -473,22 +413,101 @@ void handleRoot() {
   html += "</div>";
 
   html += "<div class='checkbox-option'>";
-  html += "<input type='checkbox' id='showDayNumbers' checked>";
-  html += "<label for='showDayNumbers'>Show day numbers in boxes</label>";
+  html += "<input type='checkbox' id='showDayNumbers'>";
+  html += "<label for='showDayNumbers'>Show upcoming dates instead of day numbers</label>";
   html += "</div>";
 
   html += "<div class='preview' id='habit-preview'>";
-  html += "<h3>🎯 Habit Card Preview</h3>";
+  html += "<h3>Habit Card Preview</h3>";
   html += "<div id='habitPreviewContent'>Fill in the habit details to see preview</div>";
   html += "</div>";
 
-  html += "<button class='print-btn' onclick='printHabitCard()'>🖨️ Print Habit Card</button>";
+  html += "<button class='print-btn' onclick='printHabitCard()'>Print Habit Card</button>";
   html += "</div>";
 
   html += "<div id='status'></div></div>";
 
   // JavaScript
   html += "<script>";
+
+  // Drag and drop functionality with mobile support
+  html += "let draggedElement = null;";
+  html += "let touchStartY = 0;";
+  html += "let touchElement = null;";
+  html += "function enableDragAndDrop() {";
+  html += "const items = document.querySelectorAll('.todo-item');";
+  html += "items.forEach(item => {";
+
+  // Desktop drag events
+  html += "item.addEventListener('dragstart', function(e) {";
+  html += "draggedElement = this;";
+  html += "this.classList.add('dragging');";
+  html += "});";
+  html += "item.addEventListener('dragend', function(e) {";
+  html += "this.classList.remove('dragging');";
+  html += "updateTodoPreview();";
+  html += "});";
+  html += "item.addEventListener('dragover', function(e) {";
+  html += "e.preventDefault();";
+  html += "});";
+  html += "item.addEventListener('drop', function(e) {";
+  html += "e.preventDefault();";
+  html += "if (draggedElement && draggedElement !== this) {";
+  html += "const container = document.getElementById('todoItems');";
+  html += "const allItems = Array.from(container.children);";
+  html += "const draggedIndex = allItems.indexOf(draggedElement);";
+  html += "const targetIndex = allItems.indexOf(this);";
+  html += "if (draggedIndex < targetIndex) {";
+  html += "container.insertBefore(draggedElement, this.nextSibling);";
+  html += "} else {";
+  html += "container.insertBefore(draggedElement, this);";
+  html += "}";
+  html += "updateTodoPreview();";
+  html += "}";
+  html += "});";
+
+  // Mobile touch events
+  html += "const handle = item.querySelector('.drag-handle');";
+  html += "if (handle) {";
+  html += "handle.addEventListener('touchstart', function(e) {";
+  html += "e.preventDefault();";
+  html += "touchStartY = e.touches[0].clientY;";
+  html += "touchElement = item;";
+  html += "item.classList.add('dragging');";
+  html += "}, {passive: false});";
+  html += "}";
+
+  html += "});";
+
+  html += "document.addEventListener('touchmove', function(e) {";
+  html += "if (touchElement) {";
+  html += "e.preventDefault();";
+  html += "const touchY = e.touches[0].clientY;";
+  html += "const container = document.getElementById('todoItems');";
+  html += "const items = Array.from(container.children);";
+  html += "const elementBelow = document.elementFromPoint(e.touches[0].clientX, touchY);";
+  html += "const targetItem = elementBelow ? elementBelow.closest('.todo-item') : null;";
+  html += "if (targetItem && targetItem !== touchElement) {";
+  html += "const targetIndex = items.indexOf(targetItem);";
+  html += "const touchIndex = items.indexOf(touchElement);";
+  html += "if (touchY > touchStartY && touchIndex < targetIndex) {";
+  html += "container.insertBefore(touchElement, targetItem.nextSibling);";
+  html += "} else if (touchY < touchStartY && touchIndex > targetIndex) {";
+  html += "container.insertBefore(touchElement, targetItem);";
+  html += "}";
+  html += "}";
+  html += "}";
+  html += "}, {passive: false});";
+
+  html += "document.addEventListener('touchend', function(e) {";
+  html += "if (touchElement) {";
+  html += "touchElement.classList.remove('dragging');";
+  html += "touchElement = null;";
+  html += "updateTodoPreview();";
+  html += "}";
+  html += "});";
+
+  html += "}";
 
   // Tab switching
   html += "function showTab(tabName) {";
@@ -510,8 +529,10 @@ void handleRoot() {
   html += "const container = document.getElementById('todoItems');";
   html += "const newItem = document.createElement('div');";
   html += "newItem.className = 'todo-item';";
-  html += "newItem.innerHTML = '<input type=\"text\" placeholder=\"Enter a task...\" class=\"todo-input\"><button class=\"remove-btn\" onclick=\"removeTodoItem(this)\">Remove</button>';";
+  html += "newItem.draggable = true;";
+  html += "newItem.innerHTML = '<span class=\"drag-handle\">=</span><input type=\"text\" placeholder=\"Enter a task...\" class=\"todo-input\"><button class=\"remove-btn\" onclick=\"removeTodoItem(this)\">Remove</button>';";
   html += "container.appendChild(newItem);";
+  html += "enableDragAndDrop();";
   html += "updateTodoPreview();";
   html += "}";
 
@@ -538,6 +559,18 @@ void handleRoot() {
   html += "preview += '<div class=\"preview-item\"></div>';";
   html += "if (title) preview += '<div class=\"preview-item\">' + title + '</div><div class=\"preview-item\"></div>';";
   html += "preview += '<div class=\"preview-item\">--------------------</div>';";
+
+  // Add core habits first
+  html += "const enabledCoreHabits = coreHabitsData.filter(h => h.enabled);";
+  html += "if (enabledCoreHabits.length > 0) {";
+  html += "preview += '<div class=\"preview-item\" style=\"font-weight: bold; color: #007bff;\">CORE HABITS:</div>';";
+  html += "enabledCoreHabits.forEach(habit => {";
+  html += "preview += '<div class=\"preview-item\">[ ] ' + habit.name + '</div>';";
+  html += "});";
+  html += "if (items.length > 0) preview += '<div class=\"preview-item\"></div><div class=\"preview-item\" style=\"font-weight: bold; color: #007bff;\">TASKS:</div>';";
+  html += "}";
+
+  // Add regular todo items
   html += "items.forEach(item => { preview += '<div class=\"preview-item\">[ ] ' + item + '</div>'; });";
   html += "preview += '<div class=\"preview-item\">--------------------</div>';";
   html += "} else { preview = 'Select a date to see preview'; }";
@@ -558,7 +591,7 @@ void handleRoot() {
   html += "const why = document.getElementById('habitWhy').value;";
   html += "const trigger = document.getElementById('habitTrigger').value;";
   html += "const startDate = document.getElementById('habitStartDate').value;";
-  html += "const showNumbers = document.getElementById('showDayNumbers').checked;";
+  html += "const showDates = document.getElementById('showDayNumbers').checked;";
   html += "let preview = '';";
   html += "if (name && why && trigger && startDate) {";
   html += "const startObj = new Date(startDate + 'T00:00:00');";
@@ -579,7 +612,13 @@ void handleRoot() {
   html += "preview += '<div class=\"preview-item\">--------------------</div>';";
   html += "let boxLine = '';";
   html += "for (let i = 1; i <= timeframe; i++) {";
-  html += "boxLine += showNumbers ? '[' + String(i).padStart(2, ' ') + '] ' : '[ ] ';";
+  html += "if (showDates) {";
+  html += "const currentDate = new Date(startObj);";
+  html += "currentDate.setDate(startObj.getDate() + i - 1);";
+  html += "boxLine += '[' + String(currentDate.getDate()).padStart(2, ' ') + '] ';";
+  html += "} else {";
+  html += "boxLine += '[' + String(i).padStart(2, ' ') + '] ';";
+  html += "}";
   html += "if (i % 7 === 0 || i === timeframe) { preview += '<div class=\"preview-item\">' + boxLine + '</div>'; boxLine = ''; }";
   html += "}";
   html += "preview += '<div class=\"preview-item\">--------------------</div>';";
@@ -598,13 +637,14 @@ void handleRoot() {
   html += "const date = document.getElementById('customDate').value;";
   html += "const title = document.getElementById('todoTitle').value;";
   html += "const items = Array.from(document.querySelectorAll('.todo-input')).map(input => input.value).filter(val => val.trim());";
+  html += "const coreHabits = coreHabitsData.filter(h => h.enabled).map(h => h.name);";
   html += "if (!date) { showStatus('Please select a date first!', 'error'); return; }";
-  html += "if (items.length === 0) { showStatus('Please add at least one to-do item!', 'error'); return; }";
+  html += "if (items.length === 0 && coreHabits.length === 0) { showStatus('Please add at least one item or enable core habits!', 'error'); return; }";
   html += "showStatus('Printing to-do list...', 'info');";
   html += "fetch('/print-todo', {";
   html += "method: 'POST',";
   html += "headers: { 'Content-Type': 'application/json' },";
-  html += "body: JSON.stringify({ date: date, title: title, items: items })";
+  html += "body: JSON.stringify({ date: date, title: title, items: items, coreHabits: coreHabits })";
   html += "}).then(function(response) {";
   html += "if (response.ok) showStatus('To-do list printed successfully!', 'success');";
   html += "else showStatus('Print failed. Check printer connection.', 'error');";
@@ -617,24 +657,116 @@ void handleRoot() {
   html += "const why = document.getElementById('habitWhy').value;";
   html += "const trigger = document.getElementById('habitTrigger').value;";
   html += "const startDate = document.getElementById('habitStartDate').value;";
-  html += "const showNumbers = document.getElementById('showDayNumbers').checked;";
+  html += "const showDates = document.getElementById('showDayNumbers').checked;";
   html += "if (!name || !why || !trigger || !startDate) { showStatus('Please fill in all habit fields!', 'error'); return; }";
   html += "showStatus('Printing habit card...', 'info');";
   html += "fetch('/print-habit', {";
   html += "method: 'POST',";
   html += "headers: { 'Content-Type': 'application/json' },";
-  html += "body: JSON.stringify({ name: name, timeframe: parseInt(timeframe), why: why, trigger: trigger, startDate: startDate, showNumbers: showNumbers })";
+  html += "body: JSON.stringify({ name: name, timeframe: parseInt(timeframe), why: why, trigger: trigger, startDate: startDate, showDates: showDates })";
   html += "}).then(function(response) {";
   html += "if (response.ok) showStatus('Habit card printed successfully!', 'success');";
   html += "else showStatus('Print failed. Check printer connection.', 'error');";
   html += "}).catch(function(error) { showStatus('Error: ' + error.message, 'error'); });";
   html += "}";
 
+  // Core habits management
+  html += "let coreHabitsData = [];";
+  html += "let editingCoreHabits = false;";
+
+  html += "function loadCoreHabits() {";
+  html += "fetch('/core-habits')";
+  html += ".then(response => response.json())";
+  html += ".then(data => {";
+  html += "coreHabitsData = data;";
+  html += "displayCoreHabits();";
+  html += "updateTodoPreview();";
+  html += "})";
+  html += ".catch(error => console.error('Error loading core habits:', error));";
+  html += "}";
+
+  html += "function displayCoreHabits() {";
+  html += "const container = document.getElementById('coreHabits');";
+  html += "if (editingCoreHabits) return;";
+  html += "let html = '';";
+  html += "coreHabitsData.forEach(habit => {";
+  html += "if (habit.enabled) {";
+  html += "html += '<div style=\"padding: 5px; background-color: #f0f8ff; border-radius: 3px; margin: 2px 0; font-size: 14px;\">• ' + habit.name + '</div>';";
+  html += "}";
+  html += "});";
+  html += "if (html === '') html = '<div style=\"color: #6c757d; font-style: italic;\">No core habits enabled</div>';";
+  html += "container.innerHTML = html;";
+  html += "}";
+
+  html += "function editCoreHabits() {";
+  html += "editingCoreHabits = true;";
+  html += "const container = document.getElementById('coreHabits');";
+  html += "let html = '';";
+  html += "coreHabitsData.forEach((habit, index) => {";
+  html += "html += '<div class=\"core-habit-item\">';";
+  html += "html += '<input type=\"checkbox\" ' + (habit.enabled ? 'checked' : '') + ' onchange=\"toggleCoreHabit(' + index + ')\">';";
+  html += "html += '<input type=\"text\" value=\"' + habit.name + '\" onchange=\"updateCoreHabitName(' + index + ', this.value)\">';";
+  html += "html += '<button onclick=\"removeCoreHabit(' + index + ')\">Remove</button>';";
+  html += "html += '</div>';";
+  html += "});";
+  html += "html += '<div style=\"margin-top: 10px;\">';";
+  html += "html += '<button onclick=\"addCoreHabit()\" style=\"background-color: #28a745; margin-right: 10px;\">+ Add Habit</button>';";
+  html += "html += '<button onclick=\"saveCoreHabits()\" style=\"background-color: #007bff; margin-right: 10px;\">Save Changes</button>';";
+  html += "html += '<button onclick=\"cancelEditCoreHabits()\" style=\"background-color: #6c757d;\">Cancel</button>';";
+  html += "html += '</div>';";
+  html += "container.innerHTML = html;";
+  html += "}";
+
+  html += "function toggleCoreHabit(index) {";
+  html += "coreHabitsData[index].enabled = !coreHabitsData[index].enabled;";
+  html += "}";
+
+  html += "function updateCoreHabitName(index, newName) {";
+  html += "coreHabitsData[index].name = newName;";
+  html += "}";
+
+  html += "function addCoreHabit() {";
+  html += "coreHabitsData.push({name: 'New Habit', enabled: true});";
+  html += "editCoreHabits();";
+  html += "}";
+
+  html += "function removeCoreHabit(index) {";
+  html += "coreHabitsData.splice(index, 1);";
+  html += "editCoreHabits();";
+  html += "}";
+
+  html += "function saveCoreHabits() {";
+  html += "fetch('/core-habits', {";
+  html += "method: 'POST',";
+  html += "headers: { 'Content-Type': 'application/json' },";
+  html += "body: JSON.stringify(coreHabitsData)";
+  html += "}).then(response => {";
+  html += "if (response.ok) {";
+  html += "editingCoreHabits = false;";
+  html += "displayCoreHabits();";
+  html += "updateTodoPreview();";
+  html += "showStatus('Core habits saved successfully!', 'success');";
+  html += "} else {";
+  html += "showStatus('Failed to save core habits', 'error');";
+  html += "}";
+  html += "}).catch(error => {";
+  html += "showStatus('Error saving core habits', 'error');";
+  html += "});";
+  html += "}";
+
+  html += "function cancelEditCoreHabits() {";
+  html += "editingCoreHabits = false;";
+  html += "loadCoreHabits();";
+  html += "}";
+
   // Event listeners
   html += "document.addEventListener('input', function() { updateTodoPreview(); updateHabitPreview(); });";
   html += "document.addEventListener('change', function() { updateTodoPreview(); updateHabitPreview(); });";
+  html += "document.addEventListener('DOMContentLoaded', function() { enableDragAndDrop(); loadCoreHabits(); });";
   html += "setToday();";
   html += "setHabitStartToday();";
+  html += "enableDragAndDrop();";
+  html += "loadCoreHabits();";
   html += "</script></body></html>";
 
   server.send(200, "text/html", html);
@@ -648,6 +780,7 @@ void handlePrintTodo() {
     String dateStr = doc["date"];
     String title = doc["title"];
     JsonArray items = doc["items"];
+    JsonArray coreHabits = doc["coreHabits"];
 
     Serial.println("Printing to-do list for date: " + dateStr);
 
@@ -694,7 +827,26 @@ void handlePrintTodo() {
     // Print separator
     printLine("--------------------");
 
-    // Print to-do items with checkboxes
+    // Print core habits first
+    if (coreHabits.size() > 0) {
+      setBold(true);
+      printLine("CORE HABITS:");
+      setBold(false);
+      for (JsonVariant habit : coreHabits) {
+        String habitItem = "[ ] " + habit.as<String>();
+        printLine(habitItem);
+      }
+
+      // Add space between core habits and regular items
+      if (items.size() > 0) {
+        advancePaper(1);
+        setBold(true);
+        printLine("TASKS:");
+        setBold(false);
+      }
+    }
+
+    // Print regular to-do items with checkboxes
     for (JsonVariant item : items) {
       String todoItem = "[ ] " + item.as<String>();
       printLine(todoItem);
@@ -725,7 +877,7 @@ void handlePrintHabit() {
     String why = doc["why"];
     String trigger = doc["trigger"];
     String startDateStr = doc["startDate"];
-    bool showNumbers = doc["showNumbers"];
+    bool showDates = doc["showDates"];
 
     Serial.println("Printing habit card: " + name);
 
@@ -792,12 +944,27 @@ void handlePrintHabit() {
     // Print tracking boxes
     String boxLine = "";
     for (int i = 1; i <= timeframe; i++) {
-      if (showNumbers) {
+      if (showDates) {
+        // Calculate actual date for this day
+        int currentMonth = month;
+        int currentDay = day + i - 1;
+
+        // Handle month overflow
+        if (currentDay > 30) {
+          currentDay -= 30;
+          currentMonth++;
+          if (currentMonth > 12) {
+            currentMonth = 1;
+          }
+        }
+
+        boxLine += "[";
+        if (currentDay < 10) boxLine += " ";
+        boxLine += String(currentDay) + "] ";
+      } else {
         boxLine += "[";
         if (i < 10) boxLine += " ";
         boxLine += String(i) + "] ";
-      } else {
-        boxLine += "[ ] ";
       }
 
       // Print line every 7 boxes or at end
@@ -826,183 +993,66 @@ void handlePrintHabit() {
   }
 }
 
-void handleReceiveText() {
-  if (server.hasArg("plain")) {
-    JsonDocument doc;
-    deserializeJson(doc, server.arg("plain"));
-
-    String transcribedText = doc["text"];
-    Serial.println("Received transcribed text: " + transcribedText);
-
-    // Parse the transcribed text into todo items
-    JsonArray todoItems = parseTodoItems(transcribedText);
-
-    if (todoItems.size() > 0) {
-      // Auto-print the todo list with today's date
-      String todayDate = getCurrentDate();
-      printAutoTodoList(todayDate, "Voice-to-Todo List", todoItems);
-
-      server.send(200, "text/plain", "Todo list created and printed successfully");
-      Serial.println("Auto-printed todo list with " + String(todoItems.size()) + " items");
-    } else {
-      server.send(200, "text/plain", "No todo items found in transcription");
-      Serial.println("No todo items detected in transcription");
-    }
-  } else {
-    server.send(400, "text/plain", "No text data received");
-  }
-}
-
-JsonArray parseTodoItems(String text) {
-  JsonDocument doc;
-  JsonArray items = doc.to<JsonArray>();
-
-  // Convert to lowercase for easier parsing
-  text.toLowerCase();
-
-  // Split text by common delimiters
-  String delimiters[] = {", ", ". ", " and ", " then ", "\n"};
-  int delimiterCount = 5;
-
-  // Simple parsing - look for action words that typically start todo items
-  String actionWords[] = {"buy", "get", "call", "email", "write", "finish", "complete", "start", "do", "make", "clean", "organize", "schedule", "plan", "review", "update", "check", "pay", "send", "pick up", "drop off", "visit", "go to", "remember to", "don't forget to"};
-  int actionWordCount = 25;
-
-  // Split the text into potential todo items
-  int startIndex = 0;
-  int textLength = text.length();
-
-  for (int i = 0; i < textLength; i++) {
-    bool foundDelimiter = false;
-
-    // Check for delimiters
-    for (int j = 0; j < delimiterCount; j++) {
-      if (text.substring(i).startsWith(delimiters[j])) {
-        String potentialItem = text.substring(startIndex, i);
-        potentialItem.trim();
-
-        // Check if this looks like a todo item
-        if (isValidTodoItem(potentialItem, actionWords, actionWordCount)) {
-          // Capitalize first letter
-          if (potentialItem.length() > 0) {
-            potentialItem.setCharAt(0, toupper(potentialItem.charAt(0)));
-          }
-          items.add(potentialItem);
-        }
-
-        startIndex = i + delimiters[j].length();
-        i = startIndex - 1; // -1 because loop will increment
-        foundDelimiter = true;
-        break;
-      }
-    }
-  }
-
-  // Check the last segment
-  String lastItem = text.substring(startIndex);
-  lastItem.trim();
-  if (isValidTodoItem(lastItem, actionWords, actionWordCount)) {
-    if (lastItem.length() > 0) {
-      lastItem.setCharAt(0, toupper(lastItem.charAt(0)));
-    }
-    items.add(lastItem);
-  }
-
-  return items;
-}
-
-bool isValidTodoItem(String item, String actionWords[], int actionWordCount) {
-  item.trim();
-  if (item.length() < 3) return false; // Too short to be meaningful
-
-  // Check if item contains action words
-  for (int i = 0; i < actionWordCount; i++) {
-    if (item.indexOf(actionWords[i]) >= 0) {
-      return true;
-    }
-  }
-
-  // If no action words found, check if it's still a reasonable todo item
-  // (has some basic structure like verb + object)
-  return item.length() > 5; // Basic length check
-}
-
-String getCurrentDate() {
-  // For now, return a placeholder - in a real implementation you'd get actual date
-  // This could be enhanced to get real-time date from NTP server
-  return "2024-01-01"; // Placeholder date format YYYY-MM-DD
-}
-
-void printAutoTodoList(String dateStr, String title, JsonArray items) {
-  Serial.println("Auto-printing todo list for date: " + dateStr);
-
-  // Parse date (using placeholder logic since we're using a fixed date)
-  int year = 2024;
-  int month = 1;
-  int day = 1;
-
-  // Calculate day of week
-  int dayOfWeek = calculateDayOfWeek(year, month, day);
-
-  // Print header
-  setAlignment('C');
-  setBold(true);
-  setTextSize('M');
-  printLine("====================");
-  printLine("     VOICE TO-DO LIST");
-  printLine("====================");
-  setBold(false);
-  advancePaper(1);
-
-  // Print date
-  setAlignment('L');
-  String dateNumbers = "01/01"; // Placeholder
-  printLine(dateNumbers);
-  String englishDate = String(days[dayOfWeek]) + ", " + String(months[month-1]) + " " + String(day);
-  printLine(englishDate);
-  advancePaper(1);
-
-  // Print title
-  if (title.length() > 0) {
-    setBold(true);
-    printLine(title);
-    setBold(false);
-    advancePaper(1);
-  }
-
-  // Print separator
-  printLine("--------------------");
-
-  // Print todo items
-  for (JsonVariant item : items) {
-    String todoItem = "[ ] " + item.as<String>();
-    printLine(todoItem);
-  }
-
-  // Print footer
-  printLine("--------------------");
-
-  // Add encouraging message
-  setAlignment('C');
-  printLine("Created from your voice!");
-  advancePaper(4);
-
-  // Reset formatting
-  setAlignment('L');
-  setBold(false);
-  setTextSize('M');
-}
-
 void handleStatus() {
-  String status = "To-Do List & Habit Tracker with Voice Ready";
+  String status = "To-Do List & Habit Tracker Ready";
   if (WiFi.status() == WL_CONNECTED) {
     status += " | WiFi: Connected";
   } else {
     status += " | WiFi: Disconnected";
   }
   status += " | IP: " + WiFi.localIP().toString();
-  status += " | Audio Server: " + String(AUDIO_SERVER_IP) + ":" + String(AUDIO_SERVER_PORT);
   server.send(200, "text/plain", status);
+}
+
+void handleGetCoreHabits() {
+  JsonDocument doc;
+  JsonArray habitsArray = doc.to<JsonArray>();
+
+  for (int i = 0; i < coreHabitsCount; i++) {
+    JsonObject habit = habitsArray.add<JsonObject>();
+    habit["name"] = coreHabits[i].name;
+    habit["enabled"] = coreHabits[i].enabled;
+  }
+
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleUpdateCoreHabits() {
+  if (server.hasArg("plain")) {
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+
+    JsonArray habitsArray = doc.as<JsonArray>();
+
+    // Clear current habits
+    coreHabitsCount = 0;
+
+    // Add new habits (up to maximum)
+    for (JsonVariant habitVar : habitsArray) {
+      if (coreHabitsCount >= MAX_CORE_HABITS) break;
+
+      JsonObject habit = habitVar.as<JsonObject>();
+      String name = habit["name"].as<String>();
+      bool enabled = habit["enabled"].as<bool>();
+
+      if (name.length() > 0 && name.length() < MAX_HABIT_NAME_LENGTH) {
+        strncpy(coreHabits[coreHabitsCount].name, name.c_str(), MAX_HABIT_NAME_LENGTH - 1);
+        coreHabits[coreHabitsCount].name[MAX_HABIT_NAME_LENGTH - 1] = '\0';
+        coreHabits[coreHabitsCount].enabled = enabled;
+        coreHabitsCount++;
+      }
+    }
+
+    // Save to EEPROM
+    saveCoreHabits();
+
+    server.send(200, "text/plain", "Core habits updated successfully");
+    Serial.println("Core habits updated via API: " + String(coreHabitsCount) + " habits");
+  } else {
+    server.send(400, "text/plain", "No data received");
+  }
 }
 
 // Calculate day of week (0=Sunday, 6=Saturday)

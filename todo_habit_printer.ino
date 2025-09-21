@@ -159,6 +159,7 @@ void setup() {
   // Setup web server routes
   server.on("/", HTTP_GET, handleRoot);
   server.on("/print-todo", HTTP_POST, handlePrintTodo);
+  server.on("/print-simple", HTTP_POST, handlePrintSimple);
   server.on("/print-habit", HTTP_POST, handlePrintHabit);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/core-habits", HTTP_GET, handleGetCoreHabits);
@@ -333,7 +334,8 @@ void handleRoot() {
   // Tab navigation
   html += "<div class='tab-container'>";
   html += "<div class='tab-buttons'>";
-  html += "<button class='tab-button active' onclick='showTab(\"todo\")'>To-Do List</button>";
+  html += "<button class='tab-button active' onclick='showTab(\"todo\")'>Daily To-Do</button>";
+  html += "<button class='tab-button' onclick='showTab(\"simple\")'>Simple List</button>";
   html += "<button class='tab-button' onclick='showTab(\"habit\")'>Habit Tracker</button>";
   html += "</div></div>";
 
@@ -380,6 +382,34 @@ void handleRoot() {
   html += "</div>";
 
   html += "<button class='print-btn' onclick='printTodoList()'>Print To-Do List</button>";
+  html += "</div>";
+
+  // Simple To-Do Tab Content
+  html += "<div id='simple-tab' class='tab-content'>";
+
+  html += "<div class='form-group'>";
+  html += "<label for='simpleTitle'>List Title (optional):</label>";
+  html += "<input type='text' id='simpleTitle' placeholder='My Simple List'>";
+  html += "</div>";
+
+  html += "<div class='form-group'>";
+  html += "<label>Simple To-Do Items (drag to reorder):</label>";
+  html += "<div id='simpleItems'>";
+  html += "<div class='todo-item' draggable='true'>";
+  html += "<span class='drag-handle'>=</span>";
+  html += "<input type='text' placeholder='Enter a task...' class='simple-input'>";
+  html += "<button class='remove-btn' onclick='removeSimpleItem(this)'>Remove</button>";
+  html += "</div>";
+  html += "</div>";
+  html += "<button class='add-btn' onclick='addSimpleItem()'>+ Add Item</button>";
+  html += "</div>";
+
+  html += "<div class='preview' id='simple-preview'>";
+  html += "<h3>Print Preview</h3>";
+  html += "<div id='simplePreviewContent'>Add items to see preview</div>";
+  html += "</div>";
+
+  html += "<button class='print-btn' onclick='printSimpleList()'>Print Simple List</button>";
   html += "</div>";
 
   // Habit Tracker Tab Content
@@ -577,6 +607,54 @@ void handleRoot() {
   html += "document.getElementById('todoPreviewContent').innerHTML = preview;";
   html += "}";
 
+  // Simple To-Do functions
+  html += "function addSimpleItem() {";
+  html += "const container = document.getElementById('simpleItems');";
+  html += "const newItem = document.createElement('div');";
+  html += "newItem.className = 'todo-item';";
+  html += "newItem.draggable = true;";
+  html += "newItem.innerHTML = '<span class=\"drag-handle\">=</span><input type=\"text\" placeholder=\"Enter a task...\" class=\"simple-input\"><button class=\"remove-btn\" onclick=\"removeSimpleItem(this)\">Remove</button>';";
+  html += "container.appendChild(newItem);";
+  html += "enableDragAndDrop();";
+  html += "updateSimplePreview();";
+  html += "}";
+
+  html += "function removeSimpleItem(btn) {";
+  html += "btn.parentElement.remove();";
+  html += "updateSimplePreview();";
+  html += "}";
+
+  html += "function updateSimplePreview() {";
+  html += "const title = document.getElementById('simpleTitle').value;";
+  html += "const items = Array.from(document.querySelectorAll('.simple-input')).map(input => input.value).filter(val => val.trim());";
+  html += "let preview = '';";
+  html += "preview += '<div class=\"preview-item\">====================</div>';";
+  html += "preview += '<div class=\"preview-item\">     TO-DO LIST</div>';";
+  html += "preview += '<div class=\"preview-item\">====================</div>';";
+  html += "preview += '<div class=\"preview-item\"></div>';";
+  html += "if (title) preview += '<div class=\"preview-item\">' + title + '</div><div class=\"preview-item\"></div>';";
+  html += "preview += '<div class=\"preview-item\">--------------------</div>';";
+  html += "items.forEach(item => { preview += '<div class=\"preview-item\">[ ] ' + item + '</div>'; });";
+  html += "if (items.length === 0) preview += '<div class=\"preview-item\">Add some tasks above!</div>';";
+  html += "preview += '<div class=\"preview-item\">--------------------</div>';";
+  html += "document.getElementById('simplePreviewContent').innerHTML = preview;";
+  html += "}";
+
+  html += "function printSimpleList() {";
+  html += "const title = document.getElementById('simpleTitle').value;";
+  html += "const items = Array.from(document.querySelectorAll('.simple-input')).map(input => input.value).filter(val => val.trim());";
+  html += "if (items.length === 0) { showStatus('Please add at least one item!', 'error'); return; }";
+  html += "showStatus('Printing simple list...', 'info');";
+  html += "fetch('/print-simple', {";
+  html += "method: 'POST',";
+  html += "headers: { 'Content-Type': 'application/json' },";
+  html += "body: JSON.stringify({ title: title, items: items })";
+  html += "}).then(function(response) {";
+  html += "if (response.ok) showStatus('Simple list printed successfully!', 'success');";
+  html += "else showStatus('Print failed. Check printer connection.', 'error');";
+  html += "}).catch(function(error) { showStatus('Error: ' + error.message, 'error'); });";
+  html += "}";
+
   // Habit tracker functions
   html += "function setHabitStartToday() {";
   html += "const today = new Date();";
@@ -760,8 +838,8 @@ void handleRoot() {
   html += "}";
 
   // Event listeners
-  html += "document.addEventListener('input', function() { updateTodoPreview(); updateHabitPreview(); });";
-  html += "document.addEventListener('change', function() { updateTodoPreview(); updateHabitPreview(); });";
+  html += "document.addEventListener('input', function() { updateTodoPreview(); updateSimplePreview(); updateHabitPreview(); });";
+  html += "document.addEventListener('change', function() { updateTodoPreview(); updateSimplePreview(); updateHabitPreview(); });";
   html += "document.addEventListener('DOMContentLoaded', function() { enableDragAndDrop(); loadCoreHabits(); });";
   html += "setToday();";
   html += "setHabitStartToday();";
@@ -862,6 +940,59 @@ void handlePrintTodo() {
     setTextSize('M');
 
     server.send(200, "text/plain", "To-do list printed successfully");
+  } else {
+    server.send(400, "text/plain", "No data received");
+  }
+}
+
+void handlePrintSimple() {
+  if (server.hasArg("plain")) {
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+
+    String title = doc["title"];
+    JsonArray items = doc["items"];
+
+    Serial.println("Printing simple list");
+
+    // Print header
+    setAlignment('C');
+    setBold(true);
+    setTextSize('M');
+    printLine("====================");
+    printLine("     TO-DO LIST");
+    printLine("====================");
+    setBold(false);
+    advancePaper(1);
+
+    // Print title if provided
+    setAlignment('L');
+    if (title.length() > 0) {
+      setBold(true);
+      printLine(title);
+      setBold(false);
+      advancePaper(1);
+    }
+
+    // Print separator
+    printLine("--------------------");
+
+    // Print to-do items with checkboxes
+    for (JsonVariant item : items) {
+      String todoItem = "[ ] " + item.as<String>();
+      printLine(todoItem);
+    }
+
+    // Print footer
+    printLine("--------------------");
+    advancePaper(4);
+
+    // Reset formatting
+    setAlignment('L');
+    setBold(false);
+    setTextSize('M');
+
+    server.send(200, "text/plain", "Simple list printed successfully");
   } else {
     server.send(400, "text/plain", "No data received");
   }

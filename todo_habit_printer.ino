@@ -271,7 +271,9 @@ void advancePaper(int lines) {
 
 void handleRoot() {
   String html = "";
-  html += "<!DOCTYPE html><html><head><title>Daily To-Do & Habit Tracker</title>";
+  html += "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<title>Daily To-Do & Habit Tracker</title>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<style>";
   // Base styles
@@ -847,7 +849,7 @@ void handleRoot() {
   html += "loadCoreHabits();";
   html += "</script></body></html>";
 
-  server.send(200, "text/html", html);
+  server.send(200, "text/html; charset=UTF-8", html);
 }
 
 void handlePrintTodo() {
